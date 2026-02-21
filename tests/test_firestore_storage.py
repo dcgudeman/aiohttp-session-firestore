@@ -6,14 +6,18 @@ import datetime as _dt
 import json
 import time
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, PropertyMock
 
 import pytest
 from aiohttp import web
 from aiohttp_session import Session
 from google.cloud.firestore_v1 import AsyncClient
 
-from aiohttp_session_firestore import FirestoreStorage
+from aiohttp_session_firestore import (
+    FirestoreStorage,
+    _default_encoder,
+    _firestore_json_default,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers / fakes
@@ -29,11 +33,14 @@ def _make_doc_snapshot(
     return snap
 
 
-def _make_doc_ref(snapshot: MagicMock | None = None) -> MagicMock:
+def _make_doc_ref(
+    snapshot: MagicMock | None = None, *, doc_id: str = "auto-id"
+) -> MagicMock:
     ref = MagicMock()
     ref.get = AsyncMock(return_value=snapshot or _make_doc_snapshot(exists=False))
     ref.set = AsyncMock()
     ref.delete = AsyncMock()
+    type(ref).id = PropertyMock(return_value=doc_id)
     return ref
 
 
@@ -274,6 +281,17 @@ class TestSaveSession:
 
         assert call_count == 1
 
+    async def test_firestore_auto_id_used_by_default(self) -> None:
+        ref = _make_doc_ref(doc_id="firestore-auto-abc123")
+        storage, _ = _make_storage(doc_ref=ref)
+        session = Session(None, data=None, new=True, max_age=None)
+        session["x"] = 1
+        response = _make_response()
+
+        await storage.save_session(_make_request(), response, session)
+
+        ref.set.assert_awaited_once()
+
     async def test_expire_timestamp_is_utc_datetime(self) -> None:
         storage, ref = _make_storage(max_age=3600)
         session = Session(None, data=None, new=True, max_age=3600)
@@ -315,6 +333,33 @@ class TestIsExpired:
     def test_naive_past_expire_treated_as_utc(self) -> None:
         past = _dt.datetime.utcnow() - _dt.timedelta(hours=1)
         assert FirestoreStorage._is_expired({"expire": past}) is True
+
+
+# ---------------------------------------------------------------------------
+# Default encoder / _firestore_json_default
+# ---------------------------------------------------------------------------
+
+
+class TestFirestoreJsonDefault:
+    def test_datetime_converted_to_millis(self) -> None:
+        dt = _dt.datetime(2024, 1, 15, 12, 0, 0, tzinfo=_dt.UTC)
+        result = _firestore_json_default(dt)
+        assert result == int(dt.timestamp() * 1000)
+
+    def test_naive_datetime_converted_to_millis(self) -> None:
+        dt = _dt.datetime(2024, 1, 15, 12, 0, 0)
+        result = _firestore_json_default(dt)
+        assert result == int(dt.timestamp() * 1000)
+
+    def test_non_datetime_raises_type_error(self) -> None:
+        with pytest.raises(TypeError, match="not JSON serializable"):
+            _firestore_json_default(object())
+
+    def test_default_encoder_handles_datetime_in_session(self) -> None:
+        dt = _dt.datetime(2024, 6, 1, tzinfo=_dt.UTC)
+        data = {"created": 100, "session": {"ts": dt}}
+        result = json.loads(_default_encoder(data))
+        assert result["session"]["ts"] == int(dt.timestamp() * 1000)
 
 
 # ---------------------------------------------------------------------------
