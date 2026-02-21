@@ -1,14 +1,87 @@
-[tool.poetry]
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
 name = "aiohttp-session-firestore"
 version = "0.1.0"
-description = ""
-authors = ["David Gudeman <dcgudeman@gmail.com>"]
+description = "Google Cloud Firestore session storage backend for aiohttp-session"
 readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.12"
+authors = [{ name = "David Gudeman", email = "dcgudeman@gmail.com" }]
+keywords = ["aiohttp", "session", "firestore", "gcp", "google-cloud", "async"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Framework :: aiohttp",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Internet :: WWW/HTTP :: Session",
+  "Typing :: Typed",
+]
+dependencies = ["aiohttp-session>=2.12", "google-cloud-firestore>=2.11"]
 
-[tool.poetry.dependencies]
-python = "^3.12"
+[project.urls]
+Homepage = "https://github.com/dcgudeman/aiohttp-session-firestore"
+Documentation = "https://github.com/dcgudeman/aiohttp-session-firestore#readme"
+Repository = "https://github.com/dcgudeman/aiohttp-session-firestore"
+Issues = "https://github.com/dcgudeman/aiohttp-session-firestore/issues"
+Changelog = "https://github.com/dcgudeman/aiohttp-session-firestore/blob/main/CHANGELOG.md"
 
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "pytest-asyncio>=0.23",
+  "pytest-cov>=5.0",
+  "mypy>=1.10",
+  "ruff>=0.5",
+]
 
-[build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+# ---------- Ruff ----------
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+
+[tool.ruff.lint]
+select = [
+  "E",   # pycodestyle errors
+  "W",   # pycodestyle warnings
+  "F",   # pyflakes
+  "I",   # isort
+  "UP",  # pyupgrade
+  "B",   # flake8-bugbear
+  "SIM", # flake8-simplify
+  "TC",  # flake8-type-checking
+  "RUF", # ruff-specific rules
+]
+
+# ---------- Mypy ----------
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+
+[[tool.mypy.overrides]]
+module = ["google.cloud.*"]
+ignore_missing_imports = true
+
+# ---------- Pytest ----------
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+# ---------- Coverage ----------
+
+[tool.coverage.run]
+source = ["aiohttp_session_firestore"]
+
+[tool.coverage.report]
+show_missing = true
