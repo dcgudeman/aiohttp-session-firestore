@@ -186,6 +186,15 @@ class TestLoadSession:
 
         assert session.new is False
 
+    async def test_document_missing_data_key_returns_empty_session(self) -> None:
+        snap = _make_doc_snapshot(exists=True, data={"other_field": "value"})
+        ref = _make_doc_ref(snap)
+        storage, _ = _make_storage(doc_ref=ref)
+
+        session = await storage.load_session(_make_request("key"))
+
+        assert session.new is True
+
     async def test_naive_expire_datetime_treated_as_utc(self) -> None:
         past_naive = _dt.datetime.utcnow() - _dt.timedelta(hours=1)
         data = json.dumps({"created": 1000, "session": {}})
@@ -282,15 +291,50 @@ class TestSaveSession:
         assert call_count == 1
 
     async def test_firestore_auto_id_used_by_default(self) -> None:
-        ref = _make_doc_ref(doc_id="firestore-auto-abc123")
-        storage, _ = _make_storage(doc_ref=ref)
+        auto_ref = _make_doc_ref(doc_id="firestore-auto-abc123")
+        write_ref = _make_doc_ref()
+        collection = MagicMock()
+        # First call (no args) returns auto_ref for ID generation;
+        # second call (with key) returns write_ref for the actual write.
+        collection.document.side_effect = [auto_ref, write_ref]
+        client = MagicMock(spec=AsyncClient)
+        client.collection.return_value = collection
+        storage = FirestoreStorage(client)
+
         session = Session(None, data=None, new=True, max_age=None)
         session["x"] = 1
         response = _make_response()
 
         await storage.save_session(_make_request(), response, session)
 
-        ref.set.assert_awaited_once()
+        calls = collection.document.call_args_list
+        assert calls[0] == ((),)  # no-arg call for auto-ID
+        assert calls[1] == (("firestore-auto-abc123",),)  # write with that ID
+        write_ref.set.assert_awaited_once()
+
+    async def test_new_nonempty_session_sets_cookie(self) -> None:
+        fixed_key = "mykey"
+        storage, _ref = _make_storage(key_factory=lambda: fixed_key, max_age=600)
+        session = Session(None, data=None, new=True, max_age=600)
+        session["x"] = 1
+        response = _make_response()
+
+        await storage.save_session(_make_request(), response, session)
+
+        cookie = response.cookies.get("AIOHTTP_SESSION")
+        assert cookie is not None
+        assert cookie.value == fixed_key
+
+    async def test_existing_empty_session_clears_cookie(self) -> None:
+        storage, _ref = _make_storage()
+        session = Session("old-key", data=None, new=False, max_age=None)
+        response = _make_response()
+
+        await storage.save_session(_make_request(), response, session)
+
+        cookie = response.cookies.get("AIOHTTP_SESSION")
+        assert cookie is not None
+        assert cookie.value == ""
 
     async def test_expire_timestamp_is_utc_datetime(self) -> None:
         storage, ref = _make_storage(max_age=3600)
@@ -333,6 +377,44 @@ class TestIsExpired:
     def test_naive_past_expire_treated_as_utc(self) -> None:
         past = _dt.datetime.utcnow() - _dt.timedelta(hours=1)
         assert FirestoreStorage._is_expired({"expire": past}) is True
+
+
+# ---------------------------------------------------------------------------
+# Round-trip (save then load)
+# ---------------------------------------------------------------------------
+
+
+class TestRoundTrip:
+    async def test_save_then_load_preserves_session_data(self) -> None:
+        """Save a session, then load it back and verify the data survives."""
+        captured: dict[str, Any] = {}
+
+        save_ref = MagicMock()
+        save_ref.set = AsyncMock(side_effect=lambda doc: captured.update(doc))
+        save_ref.delete = AsyncMock()
+        type(save_ref).id = PropertyMock(return_value="round-trip-key")
+
+        save_collection = MagicMock()
+        save_collection.document.return_value = save_ref
+        client = MagicMock(spec=AsyncClient)
+        client.collection.return_value = save_collection
+        storage = FirestoreStorage(client, max_age=3600)
+
+        session = Session(None, data=None, new=True, max_age=3600)
+        session["user"] = "alice"
+        session["count"] = 7
+        response = _make_response()
+        await storage.save_session(_make_request(), response, session)
+
+        load_snap = _make_doc_snapshot(exists=True, data=captured)
+        load_ref = _make_doc_ref(load_snap)
+        save_collection.document.return_value = load_ref
+
+        loaded = await storage.load_session(_make_request("round-trip-key"))
+
+        assert loaded.new is False
+        assert loaded.identity == "round-trip-key"
+        assert dict(loaded) == {"user": "alice", "count": 7}
 
 
 # ---------------------------------------------------------------------------

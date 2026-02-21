@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Added
 
 - `FirestoreStorage` — async Firestore session backend for `aiohttp-session`.
+- Firestore auto-generated document IDs by default (customizable via `key_factory`).
+- Firestore-aware default JSON encoder (handles `DatetimeWithNanoseconds`).
 - Server-side expiration check on every read.
 - Firestore TTL-compatible `expire` field (UTC `datetime`).
 - Skips Firestore writes for new empty sessions (cost optimization).

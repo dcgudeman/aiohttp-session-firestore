@@ -29,5 +29,7 @@ You can expect an acknowledgement within 48 hours and a follow-up within
 - **Encryption at rest:** Firestore encrypts data at rest using Google-managed
   keys. For additional protection, provide a custom `encoder`/`decoder` that
   encrypts session data at the application level.
-- **Session IDs:** Session keys default to `uuid4().hex` (128-bit random),
-  which is cryptographically suitable and resistant to prediction.
+- **Session IDs:** Session keys default to Firestore auto-generated IDs
+  (20-character alphanumeric, designed for even distribution). A custom
+  `key_factory` (e.g. `lambda: uuid.uuid4().hex`) can be supplied if
+  preferred. Both approaches produce unpredictable, collision-resistant keys.

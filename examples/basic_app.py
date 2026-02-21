@@ -36,11 +36,14 @@ async def reset(request: web.Request) -> web.Response:
 def create_app() -> web.Application:
     app = web.Application()
 
-    firestore_client = AsyncClient()
     storage = FirestoreStorage(
-        firestore_client,
+        AsyncClient(),
+        collection_name="sessions",
+        # "__session" is the only cookie name forwarded by Firebase Hosting;
+        # change to suit your deployment.
+        cookie_name="__session",
         max_age=86_400,
-        secure=False,  # set True behind HTTPS
+        secure=False,  # set True when behind HTTPS
         samesite="Lax",
     )
     setup(app, storage)

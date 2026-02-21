@@ -50,20 +50,20 @@ if __name__ == "__main__":
 `FirestoreStorage` accepts every parameter that
 `aiohttp_session.AbstractStorage` does, plus a few Firestore-specific ones:
 
-| Parameter         | Type              | Default              | Description                                                    |
-| ----------------- | ----------------- | -------------------- | -------------------------------------------------------------- |
-| `client`          | `AsyncClient`     | _(required)_         | Firestore async client instance                                |
-| `collection_name` | `str`             | `"aiohttp_sessions"` | Firestore collection for session documents                     |
-| `key_factory`     | `() -> str`       | `uuid4().hex`        | Callable that produces new session keys                        |
-| `cookie_name`     | `str`             | `"AIOHTTP_SESSION"`  | Name of the HTTP cookie                                        |
-| `max_age`         | `int \| None`     | `None`               | Session lifetime in seconds (`None` = browser session)         |
-| `secure`          | `bool \| None`    | `None`               | `Secure` cookie flag — **set to `True` in production**         |
-| `httponly`        | `bool`            | `True`               | `HttpOnly` cookie flag                                         |
-| `samesite`        | `str \| None`     | `None`               | `SameSite` cookie attribute (`"Lax"`, `"Strict"`, or `"None"`) |
-| `domain`          | `str \| None`     | `None`               | Cookie domain                                                  |
-| `path`            | `str`             | `"/"`                | Cookie path                                                    |
-| `encoder`         | `(object) -> str` | `json.dumps`         | Session data encoder                                           |
-| `decoder`         | `(str) -> Any`    | `json.loads`         | Session data decoder                                           |
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `client` | `AsyncClient` | *(required)* | Firestore async client instance |
+| `collection_name` | `str` | `"aiohttp_sessions"` | Firestore collection for session documents |
+| `key_factory` | `(() -> str) \| None` | `None` | Callable that produces new session keys. `None` uses Firestore auto-generated IDs. |
+| `cookie_name` | `str` | `"AIOHTTP_SESSION"` | Name of the HTTP cookie |
+| `max_age` | `int \| None` | `None` | Session lifetime in seconds (`None` = browser session) |
+| `secure` | `bool \| None` | `None` | `Secure` cookie flag — **set to `True` in production** |
+| `httponly` | `bool` | `True` | `HttpOnly` cookie flag |
+| `samesite` | `str \| None` | `None` | `SameSite` cookie attribute (`"Lax"`, `"Strict"`, or `"None"`) |
+| `domain` | `str \| None` | `None` | Cookie domain |
+| `path` | `str` | `"/"` | Cookie path |
+| `encoder` | `(object) -> str` | Firestore-aware `json.dumps` | Session data encoder (handles `DatetimeWithNanoseconds`) |
+| `decoder` | `(str) -> Any` | `json.loads` | Session data decoder |
 
 ### Production recommendations
 
@@ -102,7 +102,7 @@ gcloud firestore fields ttls update expire \
 Each session is stored as a Firestore document:
 
 ```
-aiohttp_sessions/{session-uuid}
+aiohttp_sessions/{firestore-auto-id}
 ├── data: '{"created": 1700000000, "session": {"user": "alice"}}'
 └── expire: 2024-11-15T12:00:00Z   (only when max_age is set)
 ```
@@ -115,16 +115,25 @@ The `data` field contains a JSON-encoded string (controlled by the
 
 Each request that touches the session incurs:
 
-| Operation                      | Firestore cost           |
-| ------------------------------ | ------------------------ |
-| Load (existing session)        | 1 document read          |
-| Load (no cookie / missing doc) | 0 reads (short-circuits) |
-| Save (non-empty session)       | 1 document write         |
-| Save (empty new session)       | 0 writes (skipped)       |
-| Save (empty existing session)  | 1 document delete        |
+| Operation | Firestore cost |
+|---|---|
+| Load (no cookie) | 0 reads (short-circuits before Firestore call) |
+| Load (cookie, doc exists) | 1 document read |
+| Load (cookie, doc missing) | 1 document read |
+| Save (non-empty session) | 1 document write |
+| Save (empty new session) | 0 writes (skipped) |
+| Save (empty existing session) | 1 document delete |
 
 The library avoids unnecessary writes — new sessions that remain empty are
 never persisted.
+
+## Default encoder
+
+The default encoder is a Firestore-aware `json.dumps` that automatically
+converts `datetime` objects (including Firestore's `DatetimeWithNanoseconds`)
+to millisecond Unix timestamps. This prevents serialization errors when session
+data contains values that originated from Firestore queries. To override, pass
+a custom `encoder`.
 
 ## Limitations
 
