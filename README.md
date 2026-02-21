@@ -55,7 +55,7 @@ if __name__ == "__main__":
 | `client` | `AsyncClient` | *(required)* | Firestore async client instance |
 | `collection_name` | `str` | `"aiohttp_sessions"` | Firestore collection for session documents |
 | `key_factory` | `(() -> str) \| None` | `None` | Callable that produces new session keys. `None` uses Firestore auto-generated IDs. |
-| `cookie_name` | `str` | `"AIOHTTP_SESSION"` | Name of the HTTP cookie |
+| `cookie_name` | `str` | `"__session"` | Name of the HTTP cookie (compatible with Firebase Hosting) |
 | `max_age` | `int \| None` | `None` | Session lifetime in seconds (`None` = browser session) |
 | `secure` | `bool \| None` | `None` | `Secure` cookie flag — **set to `True` in production** |
 | `httponly` | `bool` | `True` | `HttpOnly` cookie flag |
@@ -75,6 +75,23 @@ storage = FirestoreStorage(
     httponly=True,        # default — prevents JS access
     samesite="Lax",      # CSRF protection
 )
+```
+
+### Cookie name & Firebase Hosting
+
+The default cookie name is `__session`. This is intentional:
+[Firebase Hosting strips all cookies](https://firebase.google.com/docs/hosting/manage-cache#using_cookies)
+**except** one named `__session` before forwarding requests to Cloud Run,
+Cloud Functions, or any other backend. If you change `cookie_name` to
+anything else while deployed behind Firebase Hosting, the cookie will be
+silently dropped on every request and sessions will never persist.
+
+If you are **not** behind Firebase Hosting (e.g. running directly on
+Cloud Run with a custom domain, GKE, or locally), you can safely use any
+cookie name:
+
+```python
+storage = FirestoreStorage(client, cookie_name="MY_SESSION", ...)
 ```
 
 ## Session expiration & Firestore TTL

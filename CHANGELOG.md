@@ -7,7 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.1.0] - TBD
+## [0.1.1] - 2026-02-20
+
+### Changed
+
+- Default `cookie_name` changed from `"AIOHTTP_SESSION"` to `"__session"` for
+  Firebase Hosting compatibility (the only cookie name Firebase Hosting forwards).
+- README: added documentation explaining the `__session` cookie name choice and
+  the consequences of changing it on GCP.
+
+## [0.1.0] - 2026-02-20
 
 ### Added
 
@@ -22,5 +31,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - CI via GitHub Actions (lint, typecheck, test on Python 3.12 & 3.13).
 - Apache 2.0 license.
 
-[Unreleased]: https://github.com/dcgudeman/aiohttp-session-firestore/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/dcgudeman/aiohttp-session-firestore/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/dcgudeman/aiohttp-session-firestore/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/dcgudeman/aiohttp-session-firestore/releases/tag/v0.1.0

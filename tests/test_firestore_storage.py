@@ -65,7 +65,7 @@ def _make_request(cookie_value: str | None = None) -> web.Request:
     """Return a minimal mock request with an optional session cookie."""
     req = MagicMock(spec=web.Request)
     if cookie_value is not None:
-        req.cookies = {"AIOHTTP_SESSION": cookie_value}
+        req.cookies = {"__session": cookie_value}
     else:
         req.cookies = {}
     return req
@@ -321,7 +321,7 @@ class TestSaveSession:
 
         await storage.save_session(_make_request(), response, session)
 
-        cookie = response.cookies.get("AIOHTTP_SESSION")
+        cookie = response.cookies.get("__session")
         assert cookie is not None
         assert cookie.value == fixed_key
 
@@ -332,7 +332,7 @@ class TestSaveSession:
 
         await storage.save_session(_make_request(), response, session)
 
-        cookie = response.cookies.get("AIOHTTP_SESSION")
+        cookie = response.cookies.get("__session")
         assert cookie is not None
         assert cookie.value == ""
 

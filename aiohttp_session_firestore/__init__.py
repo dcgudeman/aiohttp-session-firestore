@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from aiohttp import web
 
 __all__ = ["FirestoreStorage"]
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 
 def _firestore_json_default(obj: Any) -> Any:
@@ -77,7 +77,7 @@ class FirestoreStorage(AbstractStorage):
         *,
         collection_name: str = "aiohttp_sessions",
         key_factory: Callable[[], str] | None = None,
-        cookie_name: str = "AIOHTTP_SESSION",
+        cookie_name: str = "__session",
         domain: str | None = None,
         max_age: int | None = None,
         path: str = "/",

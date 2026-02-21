@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "aiohttp-session-firestore"
-version = "0.1.0"
+version = "0.1.1"
 description = "Google Cloud Firestore session storage backend for aiohttp-session"
 readme = "README.md"
 license = "Apache-2.0"
