@@ -5,19 +5,23 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import time
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock, PropertyMock
+from typing import TYPE_CHECKING, Any
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
 from aiohttp import web
 from aiohttp_session import Session
-from google.cloud.firestore_v1 import AsyncClient
+from google.api_core.exceptions import NotFound, ServiceUnavailable
+from google.cloud.firestore_v1 import DELETE_FIELD, AsyncClient
 
 from aiohttp_session_firestore import (
     FirestoreStorage,
     _default_encoder,
     _firestore_json_default,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 # ---------------------------------------------------------------------------
 # Helpers / fakes
@@ -39,6 +43,7 @@ def _make_doc_ref(
     ref = MagicMock()
     ref.get = AsyncMock(return_value=snapshot or _make_doc_snapshot(exists=False))
     ref.set = AsyncMock()
+    ref.update = AsyncMock()
     ref.delete = AsyncMock()
     type(ref).id = PropertyMock(return_value=doc_id)
     return ref
@@ -75,6 +80,26 @@ def _make_response() -> web.Response:
     return web.Response()
 
 
+@pytest.fixture
+def clock(monkeypatch: pytest.MonkeyPatch) -> Callable[[int], None]:
+    """Advance both the storage and aiohttp-session clocks without sleeping."""
+    timestamp = 1_700_000_000
+
+    class FrozenDatetime(_dt.datetime):
+        @classmethod
+        def now(cls, tz: _dt.tzinfo | None = None) -> FrozenDatetime:
+            return cls.fromtimestamp(timestamp, tz)
+
+    monkeypatch.setattr(_dt, "datetime", FrozenDatetime)
+    monkeypatch.setattr(time, "time", lambda: timestamp)
+
+    def advance(seconds: int) -> None:
+        nonlocal timestamp
+        timestamp += seconds
+
+    return advance
+
+
 # ---------------------------------------------------------------------------
 # Constructor
 # ---------------------------------------------------------------------------
@@ -102,6 +127,30 @@ class TestConstructor:
 
 
 class TestLoadSession:
+    @pytest.mark.parametrize(
+        "cookie",
+        [
+            "",
+            "a/b",
+            "a/b/c",
+            ".",
+            "..",
+            "__reserved__",
+            "x" * 1501,
+            "é" * 751,
+            "\ud800",
+        ],
+    )
+    async def test_invalid_cookie_never_accesses_firestore(self, cookie: str) -> None:
+        storage, ref = _make_storage()
+
+        session = await storage.load_session(_make_request(cookie))
+
+        assert session.new is True
+        assert session.identity is None
+        storage._collection.document.assert_not_called()  # type: ignore[attr-defined]
+        ref.get.assert_not_awaited()
+
     async def test_no_cookie_returns_new_session(self) -> None:
         storage, _ = _make_storage()
         session = await storage.load_session(_make_request(cookie_value=None))
@@ -196,7 +245,9 @@ class TestLoadSession:
         assert session.new is True
 
     async def test_naive_expire_datetime_treated_as_utc(self) -> None:
-        past_naive = _dt.datetime.utcnow() - _dt.timedelta(hours=1)
+        past_naive = _dt.datetime.now(tz=_dt.UTC).replace(tzinfo=None) - _dt.timedelta(
+            hours=1
+        )
         data = json.dumps({"created": 1000, "session": {}})
         snap = _make_doc_snapshot(
             exists=True, data={"data": data, "expire": past_naive}
@@ -250,7 +301,46 @@ class TestSaveSession:
 
         await storage.save_session(_make_request(), response, session)
 
+        ref.update.assert_awaited_once()
+        ref.set.assert_not_awaited()
+
+    async def test_deleted_session_is_not_recreated(self) -> None:
+        storage, ref = _make_storage()
+        ref.update.side_effect = NotFound("Session deleted")  # type: ignore[no-untyped-call]
+        session = Session("old-key", data=None, new=False)
+        session["user"] = "alice"
+        response = _make_response()
+
+        await storage.save_session(_make_request(), response, session)
+
+        ref.update.assert_awaited_once()
+        ref.set.assert_not_awaited()
+        assert response.cookies["__session"].value == ""
+        assert response.cookies["__session"]["max-age"] == "0"
+
+    async def test_update_backend_failure_is_not_treated_as_logout(self) -> None:
+        storage, ref = _make_storage()
+        ref.update.side_effect = ServiceUnavailable("Unavailable")  # type: ignore[no-untyped-call]
+        session = Session("key", data=None, new=False)
+        session["user"] = "alice"
+        response = _make_response()
+
+        with pytest.raises(ServiceUnavailable):
+            await storage.save_session(_make_request(), response, session)
+
+        assert not response.cookies
+        ref.set.assert_not_awaited()
+
+    async def test_new_session_with_explicit_identity_is_created(self) -> None:
+        storage, ref = _make_storage()
+        session = Session(None, data=None, new=True)
+        session.set_new_identity("custom-key")
+        session["user"] = "alice"
+
+        await storage.save_session(_make_request(), _make_response(), session)
+
         ref.set.assert_awaited_once()
+        ref.update.assert_not_awaited()
 
     async def test_existing_empty_session_deletes_document(self) -> None:
         storage, ref = _make_storage()
@@ -290,27 +380,34 @@ class TestSaveSession:
 
         assert call_count == 1
 
-    async def test_firestore_auto_id_used_by_default(self) -> None:
-        auto_ref = _make_doc_ref(doc_id="firestore-auto-abc123")
-        write_ref = _make_doc_ref()
-        collection = MagicMock()
-        # First call (no args) returns auto_ref for ID generation;
-        # second call (with key) returns write_ref for the actual write.
-        collection.document.side_effect = [auto_ref, write_ref]
-        client = MagicMock(spec=AsyncClient)
-        client.collection.return_value = collection
-        storage = FirestoreStorage(client)
-
+    async def test_default_key_uses_cryptographic_randomness(self) -> None:
+        storage, ref = _make_storage()
         session = Session(None, data=None, new=True, max_age=None)
         session["x"] = 1
         response = _make_response()
 
-        await storage.save_session(_make_request(), response, session)
+        with patch(
+            "aiohttp_session_firestore.secrets.token_urlsafe", return_value="secure-key"
+        ) as token:
+            await storage.save_session(_make_request(), response, session)
 
-        calls = collection.document.call_args_list
-        assert calls[0] == ((),)  # no-arg call for auto-ID
-        assert calls[1] == (("firestore-auto-abc123",),)  # write with that ID
-        write_ref.set.assert_awaited_once()
+        token.assert_called_once_with(32)
+        assert response.cookies["__session"].value == "secure-key"
+        ref.set.assert_awaited_once()
+
+    @pytest.mark.parametrize("key", [None, 123, "", "a/b/c", "x" * 1501])
+    async def test_invalid_custom_key_fails_before_writing(self, key: Any) -> None:
+        storage, ref = _make_storage(key_factory=lambda: key)
+        session = Session(None, data=None, new=True)
+        session["x"] = 1
+        response = _make_response()
+
+        with pytest.raises(ValueError, match="valid Firestore document ID"):
+            await storage.save_session(_make_request(), response, session)
+
+        assert not response.cookies
+        ref.set.assert_not_awaited()
+        ref.update.assert_not_awaited()
 
     async def test_new_nonempty_session_sets_cookie(self) -> None:
         fixed_key = "mykey"
@@ -355,6 +452,128 @@ class TestSaveSession:
 
 
 # ---------------------------------------------------------------------------
+# Per-session expiration
+# ---------------------------------------------------------------------------
+
+
+class TestSessionLifetime:
+    @pytest.mark.parametrize(
+        ("default_age", "session_age", "elapsed"),
+        [(60, 3600, 120), (3600, 60, 30), (60, None, 86400), (None, 60, 30)],
+    )
+    async def test_lifetime_override_survives_load_and_expires_on_time(
+        self,
+        clock: Callable[[int], None],
+        default_age: int | None,
+        session_age: int | None,
+        elapsed: int,
+    ) -> None:
+        storage, ref = _make_storage(max_age=default_age)
+        session = Session(None, data=None, new=True, max_age=default_age)
+        session["user"] = "alice"
+        session.max_age = session_age
+        response = _make_response()
+
+        await storage.save_session(_make_request(), response, session)
+        written = ref.set.call_args.args[0]
+        ref.get.return_value = _make_doc_snapshot(data=written)
+        assert written["max_age"] == session_age
+        cookie = response.cookies["__session"]
+        if session_age is None:
+            assert "expire" not in written
+            assert cookie["max-age"] == cookie["expires"] == ""
+        else:
+            assert cookie["max-age"] == str(session_age)
+
+        clock(elapsed)
+        loaded = await storage.load_session(_make_request(cookie.value))
+        assert loaded["user"] == "alice"
+        assert loaded.max_age == session_age
+
+        if session_age is not None:
+            clock(session_age - elapsed)
+            expired = await storage.load_session(_make_request(cookie.value))
+            assert expired.new is True
+            assert expired.identity is None
+            assert expired.empty
+
+    async def test_changed_only_save_uses_refreshed_deadline(
+        self, clock: Callable[[int], None]
+    ) -> None:
+        storage, ref = _make_storage(max_age=60)
+        session = Session(None, data=None, new=True, max_age=60)
+        session["preferences"] = {"theme": "light"}
+        await storage.save_session(_make_request(), _make_response(), session)
+        ref.get.return_value = _make_doc_snapshot(data=ref.set.call_args.args[0])
+
+        clock(50)
+        loaded = await storage.load_session(_make_request("key"))
+        loaded["preferences"]["theme"] = "dark"
+        loaded.changed()
+        await storage.save_session(_make_request(), _make_response(), loaded)
+        ref.get.return_value = _make_doc_snapshot(data=ref.update.call_args.args[0])
+
+        clock(20)  # Past created + 60, but before the refreshed expiration.
+        refreshed = await storage.load_session(_make_request("key"))
+        assert refreshed["preferences"] == {"theme": "dark"}
+        assert refreshed.max_age == 60
+
+    async def test_lifetime_only_change_refreshes_deadline(
+        self, clock: Callable[[int], None]
+    ) -> None:
+        storage, ref = _make_storage(max_age=60)
+        data = json.dumps({"created": int(time.time()), "session": {"user": "alice"}})
+        ref.get.return_value = _make_doc_snapshot(data={"data": data})
+        clock(50)
+        session = await storage.load_session(_make_request("key"))
+        session.max_age = 120
+        session.changed()
+
+        await storage.save_session(_make_request(), _make_response(), session)
+        ref.get.return_value = _make_doc_snapshot(data=ref.update.call_args.args[0])
+
+        clock(80)
+        loaded = await storage.load_session(_make_request("key"))
+        assert loaded["user"] == "alice"
+        assert loaded.max_age == 120
+
+    async def test_removing_lifetime_deletes_previous_expiration(
+        self, clock: Callable[[int], None]
+    ) -> None:
+        storage, ref = _make_storage(max_age=60)
+        session = Session("key", data=None, new=False, max_age=60)
+        session["user"] = "alice"
+        session.max_age = None
+        response = _make_response()
+        response.set_cookie("__session", "key", expires="old-expiration", max_age=60)
+
+        await storage.save_session(_make_request(), response, session)
+
+        written = ref.update.call_args.args[0]
+        assert written["max_age"] is None
+        assert written["expire"] is DELETE_FIELD
+        cookie = response.cookies["__session"]
+        assert cookie["max-age"] == cookie["expires"] == ""
+
+    async def test_legacy_document_uses_default_lifetime(
+        self, clock: Callable[[int], None]
+    ) -> None:
+        data = json.dumps({"created": int(time.time()), "session": {"user": "alice"}})
+        storage, _ = _make_storage(
+            doc_ref=_make_doc_ref(_make_doc_snapshot(data={"data": data})), max_age=60
+        )
+
+        clock(30)
+        loaded = await storage.load_session(_make_request("legacy-auto-ID-12345"))
+        assert loaded["user"] == "alice"
+        assert loaded.max_age == 60
+
+        clock(31)
+        expired = await storage.load_session(_make_request("legacy-auto-ID-12345"))
+        assert expired.empty
+
+
+# ---------------------------------------------------------------------------
 # _is_expired
 # ---------------------------------------------------------------------------
 
@@ -375,7 +594,9 @@ class TestIsExpired:
         assert FirestoreStorage._is_expired({"expire": past}) is True
 
     def test_naive_past_expire_treated_as_utc(self) -> None:
-        past = _dt.datetime.utcnow() - _dt.timedelta(hours=1)
+        past = _dt.datetime.now(tz=_dt.UTC).replace(tzinfo=None) - _dt.timedelta(
+            hours=1
+        )
         assert FirestoreStorage._is_expired({"expire": past}) is True
 
 

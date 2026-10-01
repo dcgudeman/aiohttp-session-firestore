@@ -28,10 +28,12 @@ from google.cloud.firestore_v1 import AsyncClient
 
 from aiohttp_session_firestore import FirestoreStorage
 
+
 async def handler(request: web.Request) -> web.Response:
     session = await get_session(request)
     session["visits"] = session.get("visits", 0) + 1
     return web.Response(text=f"Visits: {session['visits']}")
+
 
 def create_app() -> web.Application:
     app = web.Application()
@@ -40,6 +42,7 @@ def create_app() -> web.Application:
     setup(app, storage)
     app.router.add_get("/", handler)
     return app
+
 
 if __name__ == "__main__":
     web.run_app(create_app())
@@ -54,7 +57,7 @@ if __name__ == "__main__":
 |---|---|---|---|
 | `client` | `AsyncClient` | *(required)* | Firestore async client instance |
 | `collection_name` | `str` | `"aiohttp_sessions"` | Firestore collection for session documents |
-| `key_factory` | `(() -> str) \| None` | `None` | Callable that produces new session keys. `None` uses Firestore auto-generated IDs. |
+| `key_factory` | `(() -> str) \| None` | `None` | Callable that produces new session keys. `None` uses `secrets.token_urlsafe(32)`. |
 | `cookie_name` | `str` | `"__session"` | Name of the HTTP cookie (compatible with Firebase Hosting) |
 | `max_age` | `int \| None` | `None` | Session lifetime in seconds (`None` = browser session) |
 | `secure` | `bool \| None` | `None` | `Secure` cookie flag — **set to `True` in production** |
@@ -65,15 +68,19 @@ if __name__ == "__main__":
 | `encoder` | `(object) -> str` | Firestore-aware `json.dumps` | Session data encoder (handles `DatetimeWithNanoseconds`) |
 | `decoder` | `(str) -> Any` | `json.loads` | Session data decoder |
 
+Custom key factories must return cryptographically unpredictable keys that are
+valid single Firestore document IDs. Invalid generated keys raise `ValueError`;
+invalid session cookies are treated as missing sessions.
+
 ### Production recommendations
 
 ```python
 storage = FirestoreStorage(
     client,
-    max_age=86400,       # 24-hour sessions
-    secure=True,         # HTTPS only
-    httponly=True,        # default — prevents JS access
-    samesite="Lax",      # CSRF protection
+    max_age=86400,  # 24-hour sessions
+    secure=True,  # HTTPS only
+    httponly=True,  # default — prevents JS access
+    samesite="Lax",  # CSRF protection
 )
 ```
 
@@ -96,9 +103,23 @@ storage = FirestoreStorage(client, cookie_name="MY_SESSION", ...)
 
 ## Session expiration & Firestore TTL
 
-When `max_age` is set, each session document is written with an `expire` field
-containing a UTC `datetime`. The library checks this field on every read and
-treats expired documents as missing immediately.
+When `max_age` is set, saving a changed session writes an `expire` field containing
+a UTC `datetime`, calculated from the save time and that session's lifetime.
+The library checks this deadline on every read and treats expired documents as
+missing immediately.
+
+Per-session overrides are persisted and restored on later requests. If you only
+change the lifetime, call `session.changed()` so aiohttp-session saves it:
+
+```python
+session.max_age = 3600
+session.changed()
+```
+
+Setting `session.max_age = None` creates a browser-session cookie and removes the
+server expiration; those documents have no automatic TTL cleanup. Documents
+written by earlier versions without a stored `max_age` use the storage default
+when loaded, while an existing `expire` timestamp remains the current deadline.
 
 For **automatic cleanup** of expired documents, configure a
 [Firestore TTL policy](https://cloud.google.com/firestore/docs/ttl) on the
@@ -110,8 +131,8 @@ gcloud firestore fields ttls update expire \
     --enable-ttl
 ```
 
-> **Note:** Firestore's TTL deletion is best-effort and may take up to
-> 72 hours. The server-side expiration check in `load_session` ensures
+> **Note:** Firestore's TTL deletion is asynchronous. The server-side expiration
+> check in `load_session` ensures
 > correctness regardless of TTL policy timing.
 
 ## Document structure
@@ -119,8 +140,9 @@ gcloud firestore fields ttls update expire \
 Each session is stored as a Firestore document:
 
 ```
-aiohttp_sessions/{firestore-auto-id}
+aiohttp_sessions/{session-key}
 ├── data: '{"created": 1700000000, "session": {"user": "alice"}}'
+├── max_age: 3600                (null for a browser session)
 └── expire: 2024-11-15T12:00:00Z   (only when max_age is set)
 ```
 
@@ -154,6 +176,9 @@ a custom `encoder`.
 
 ## Limitations
 
+- **Concurrent requests:** Concurrent changes to an existing session use
+  last-writer-wins behavior. A stale request cannot recreate a session deleted by
+  logout; its response clears the session cookie instead.
 - **Session data must be JSON-serializable** (or serializable by your custom
   encoder). Avoid storing large blobs; Firestore documents are limited to
   1 MiB.
@@ -180,6 +205,12 @@ ruff check .
 ruff format --check .
 mypy aiohttp_session_firestore
 pytest --cov
+```
+
+To run the integration tests against an already-running local Firestore emulator:
+
+```bash
+FIRESTORE_EMULATOR_HOST=127.0.0.1:8789 pytest tests/test_firestore_integration.py
 ```
 
 ## License
