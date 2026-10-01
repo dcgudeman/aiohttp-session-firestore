@@ -106,7 +106,8 @@ storage = FirestoreStorage(client, cookie_name="MY_SESSION", ...)
 When `max_age` is set, saving a changed session writes an `expire` field containing
 a UTC `datetime`, calculated from the save time and that session's lifetime.
 The library checks this deadline on every read and treats expired documents as
-missing immediately.
+missing immediately. It deletes an expired document only if it has not changed
+since the read, so cleanup cannot remove a concurrently refreshed session.
 
 Per-session overrides are persisted and restored on later requests. If you only
 change the lifetime, call `session.changed()` so aiohttp-session saves it:
@@ -182,9 +183,9 @@ a custom `encoder`.
 - **Session data must be JSON-serializable** (or serializable by your custom
   encoder). Avoid storing large blobs; Firestore documents are limited to
   1 MiB.
-- **Eventual consistency:** Firestore in Datastore mode uses eventual
-  consistency for some queries. This library reads by document ID (strongly
-  consistent in both Native and Datastore mode).
+- **Database mode:** This library requires Firestore in Native mode. Datastore
+  mode does not support the Firestore API used by this library. Document reads
+  are strongly consistent.
 - **No built-in encryption:** Firestore encrypts data at rest (Google-managed
   keys). If you need app-level encryption, provide a custom `encoder`/`decoder`
   pair that encrypts before writing and decrypts after reading.

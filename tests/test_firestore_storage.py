@@ -5,14 +5,15 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import time
+from collections import UserDict
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
 from aiohttp import web
 from aiohttp_session import Session
-from google.api_core.exceptions import NotFound, ServiceUnavailable
-from google.cloud.firestore_v1 import DELETE_FIELD, AsyncClient
+from google.api_core.exceptions import FailedPrecondition, NotFound, ServiceUnavailable
+from google.cloud.firestore_v1 import DELETE_FIELD, AsyncClient, LastUpdateOption
 
 from aiohttp_session_firestore import (
     FirestoreStorage,
@@ -34,6 +35,7 @@ def _make_doc_snapshot(
     snap = MagicMock()
     snap.exists = exists
     snap.to_dict.return_value = data
+    snap.update_time = _dt.datetime.now(tz=_dt.UTC)
     return snap
 
 
@@ -191,7 +193,32 @@ class TestLoadSession:
         session = await storage.load_session(_make_request("old-key"))
 
         assert session.new is True
-        ref.delete.assert_awaited_once()
+        ref.delete.assert_awaited_once_with(option=LastUpdateOption(snap.update_time))
+
+    @pytest.mark.parametrize("error", [FailedPrecondition, NotFound])
+    async def test_expired_document_changed_before_cleanup(self, error: Any) -> None:
+        past = _dt.datetime.now(tz=_dt.UTC) - _dt.timedelta(hours=1)
+        snap = _make_doc_snapshot(data={"expire": past})
+        ref = _make_doc_ref(snap)
+        ref.delete.side_effect = error("Document changed")
+        storage, _ = _make_storage(doc_ref=ref, max_age=60)
+
+        session = await storage.load_session(_make_request("expired-key"))
+
+        assert session.new is True
+        assert session.identity is None
+        assert session.empty
+        assert session.max_age == 60
+        ref.delete.assert_awaited_once_with(option=LastUpdateOption(snap.update_time))
+
+    async def test_expired_cleanup_backend_failure_propagates(self) -> None:
+        past = _dt.datetime.now(tz=_dt.UTC) - _dt.timedelta(hours=1)
+        ref = _make_doc_ref(_make_doc_snapshot(data={"expire": past}))
+        ref.delete.side_effect = ServiceUnavailable("Unavailable")
+        storage, _ = _make_storage(doc_ref=ref)
+
+        with pytest.raises(ServiceUnavailable):
+            await storage.load_session(_make_request("expired-key"))
 
     async def test_corrupted_data_returns_new_session(self) -> None:
         snap = _make_doc_snapshot(exists=True, data={"data": "NOT-VALID-JSON!!!"})
@@ -202,6 +229,56 @@ class TestLoadSession:
 
         assert session.new is True
         assert session.identity is None
+
+    @pytest.mark.parametrize(
+        "data",
+        [
+            None,
+            False,
+            1,
+            "text",
+            [],
+            [1],
+            {},
+            {"session": {"user": "alice"}},
+            {"created": 1},
+            {"created": None, "session": {}},
+            {"created": True, "session": {}},
+            {"created": "yesterday", "session": {}},
+            {"created": 1.5, "session": {}},
+            {"created": 1, "session": None},
+            {"created": 1, "session": 1},
+            {"created": 1, "session": "text"},
+            {"created": 1, "session": [["user", "alice"]]},
+        ],
+    )
+    async def test_invalid_decoded_structure_returns_new_session(
+        self, data: Any
+    ) -> None:
+        snap = _make_doc_snapshot(data={"data": json.dumps(data)})
+        ref = _make_doc_ref(snap)
+        storage, _ = _make_storage(doc_ref=ref, max_age=60)
+
+        session = await storage.load_session(_make_request("bad-key"))
+
+        assert session.new is True
+        assert session.identity is None
+        assert session.empty
+        assert session.max_age == 60
+        ref.delete.assert_not_awaited()
+
+    async def test_custom_decoder_can_return_mappings(self) -> None:
+        now = int(time.time())
+        decoded = UserDict({"created": now, "session": UserDict({"user": "alice"})})
+        ref = _make_doc_ref(_make_doc_snapshot(data={"data": "custom-encoding"}))
+        storage, _ = _make_storage(doc_ref=ref, decoder=lambda _: decoded)
+
+        session = await storage.load_session(_make_request("key"))
+
+        assert session.new is False
+        assert session.identity == "key"
+        assert session.created == now
+        assert dict(session) == {"user": "alice"}
 
     async def test_document_with_none_to_dict(self) -> None:
         snap = _make_doc_snapshot(exists=True, data=None)

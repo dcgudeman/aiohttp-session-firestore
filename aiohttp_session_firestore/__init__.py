@@ -5,15 +5,18 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import secrets
+from collections.abc import Mapping
+from contextlib import suppress
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from aiohttp_session import AbstractStorage, Session
-from google.api_core.exceptions import NotFound
+from google.api_core.exceptions import FailedPrecondition, NotFound
 from google.cloud.firestore_v1 import (
     DELETE_FIELD,
     AsyncClient,
     AsyncCollectionReference,
+    LastUpdateOption,
 )
 
 if TYPE_CHECKING:
@@ -22,7 +25,7 @@ if TYPE_CHECKING:
     from aiohttp import web
 
 __all__ = ["FirestoreStorage"]
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 
 
 def _firestore_json_default(obj: Any) -> Any:
@@ -118,7 +121,7 @@ class FirestoreStorage(AbstractStorage):
         * no session cookie is present,
         * the referenced document does not exist,
         * the document has expired (server-side check), or
-        * the stored data cannot be decoded.
+        * the stored data cannot be decoded or has an invalid structure.
         """
         cookie = self.load_cookie(request)
         if cookie is None or not self._is_valid_key(cookie):
@@ -136,12 +139,22 @@ class FirestoreStorage(AbstractStorage):
             return Session(None, data=None, new=True, max_age=self.max_age)
 
         if self._is_expired(doc_dict):
-            await doc_ref.delete()
+            # Delete only the version we read: another request may have
+            # refreshed or removed the document since the snapshot.
+            with suppress(FailedPrecondition, NotFound):
+                await doc_ref.delete(option=LastUpdateOption(doc.update_time))
             return Session(None, data=None, new=True, max_age=self.max_age)
 
         try:
             data = self._decoder(doc_dict.get("data", "{}"))
         except (ValueError, TypeError):
+            return Session(None, data=None, new=True, max_age=self.max_age)
+
+        if (
+            not isinstance(data, Mapping)
+            or type(data.get("created")) is not int
+            or not isinstance(data.get("session"), Mapping)
+        ):
             return Session(None, data=None, new=True, max_age=self.max_age)
 
         max_age = doc_dict.get("max_age", self.max_age)
@@ -152,7 +165,10 @@ class FirestoreStorage(AbstractStorage):
         # unchanged. Do not let Session's age check override that deadline.
         has_expire = isinstance(doc_dict.get("expire"), _dt.datetime)
         session = Session(
-            key, data=data, new=False, max_age=None if has_expire else max_age
+            key,
+            data={"created": data["created"], "session": dict(data["session"])},
+            new=False,
+            max_age=None if has_expire else max_age,
         )
         session.max_age = max_age
         return session

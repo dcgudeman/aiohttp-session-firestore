@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
+import json
 import os
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
@@ -13,14 +15,14 @@ import pytest_asyncio
 from aiohttp import CookieJar, web
 from aiohttp.test_utils import TestClient, TestServer
 from aiohttp_session import get_session, setup
-from google.cloud.firestore_v1 import AsyncClient
+from google.cloud.firestore_v1 import AsyncClient, AsyncDocumentReference
 
 from aiohttp_session_firestore import FirestoreStorage
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from google.cloud.firestore_v1 import AsyncCollectionReference
+    from google.cloud.firestore_v1 import AsyncCollectionReference, DocumentSnapshot
 
 
 @pytest_asyncio.fixture
@@ -186,4 +188,85 @@ async def test_logout_cannot_be_undone_by_a_stale_request(
         assert stale_response.status == 204
         assert not (await doc_ref.get()).exists
         response = await http.get("/", cookies={"__session": key})
+        assert await response.json() == {}
+
+
+@pytest.mark.parametrize("concurrent_change", ["none", "refresh", "delete"])
+async def test_expired_session_cleanup_handles_concurrent_changes(
+    backend: tuple[AsyncClient, AsyncCollectionReference],
+    monkeypatch: pytest.MonkeyPatch,
+    concurrent_change: str,
+) -> None:
+    client, collection = backend
+    storage = FirestoreStorage(client, collection_name=collection.id, max_age=600)
+    doc_ref = collection.document("expired-session")
+    now = dt.datetime.now(dt.UTC)
+    payload = json.dumps(
+        {"created": int(now.timestamp()), "session": {"user": "alice"}}
+    )
+    await doc_ref.set(
+        {"data": payload, "max_age": 600, "expire": now - dt.timedelta(minutes=1)}
+    )
+    original_get = AsyncDocumentReference.get
+    snapshot_read = False
+
+    async def get_then_change(ref: AsyncDocumentReference) -> DocumentSnapshot:
+        nonlocal snapshot_read
+        snapshot = await original_get(ref)
+        if ref.path == doc_ref.path and not snapshot_read:
+            snapshot_read = True
+            # Change the real document after reading the expired snapshot.
+            # Firestore itself must enforce the delete's update-time condition.
+            if concurrent_change == "refresh":
+                await ref.update({"expire": now + dt.timedelta(minutes=10)})
+            elif concurrent_change == "delete":
+                await ref.delete()
+        return snapshot
+
+    monkeypatch.setattr(AsyncDocumentReference, "get", get_then_change)
+    async with (
+        asyncio.timeout(15),
+        TestClient(
+            TestServer(_make_app(storage)), cookie_jar=CookieJar(unsafe=True)
+        ) as http,
+    ):
+        response = await http.get("/", cookies={"__session": doc_ref.id})
+        assert response.status == 200
+        assert await response.json() == {}
+        assert snapshot_read
+
+        document = await doc_ref.get()
+        assert document.exists is (concurrent_change == "refresh")
+        if concurrent_change == "refresh":
+            assert document.to_dict() == {
+                "data": payload,
+                "max_age": 600,
+                "expire": now + dt.timedelta(minutes=10),
+            }
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "[1]",
+        "1",
+        '{"created":"yesterday","session":{"user":"alice"}}',
+        '{"created":1,"session":[1]}',
+    ],
+)
+async def test_http_malformed_stored_session_starts_empty(
+    backend: tuple[AsyncClient, AsyncCollectionReference], payload: str
+) -> None:
+    client, collection = backend
+    storage = FirestoreStorage(client, collection_name=collection.id)
+    doc_ref = collection.document("malformed-session")
+    await doc_ref.set({"data": payload})
+    async with (
+        asyncio.timeout(15),
+        TestClient(
+            TestServer(_make_app(storage)), cookie_jar=CookieJar(unsafe=True)
+        ) as http,
+    ):
+        response = await http.get("/", cookies={"__session": doc_ref.id})
+        assert response.status == 200
         assert await response.json() == {}

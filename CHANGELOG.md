@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-10-01
+
+### Fixed
+
+- Guard expired-document deletion with its last-update timestamp so cleanup
+  cannot delete a session refreshed by a concurrent request.
+- Treat malformed stored session structures as missing sessions instead of
+  raising errors during loading.
+- Correct the README to require Firestore Native mode; Datastore mode is not
+  supported.
+
+### Changed
+
+- Classify the package as Production/Stable.
+- Require Firestore 2.28 or newer on Python 3.14 and later to avoid incompatible
+  older protobuf installations. Retain the Firestore 2.11 minimum on Python
+  3.12 and 3.13.
+
 ## [0.1.2] - 2026-10-01
 
 ### Fixed
@@ -52,7 +70,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - CI via GitHub Actions (lint, typecheck, test on Python 3.12 & 3.13).
 - Apache 2.0 license.
 
-[Unreleased]: https://github.com/dcgudeman/aiohttp-session-firestore/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/dcgudeman/aiohttp-session-firestore/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/dcgudeman/aiohttp-session-firestore/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/dcgudeman/aiohttp-session-firestore/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/dcgudeman/aiohttp-session-firestore/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/dcgudeman/aiohttp-session-firestore/releases/tag/v0.1.0
